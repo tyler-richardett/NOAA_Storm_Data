@@ -1,0 +1,222 @@
+# Measuring the Economic and Human Impact of Weather Events in the United States, 1996-2011
+
+## Synopsis
+
+The U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+### Injuries and Fatalities
+
+Based on total amounts from 1996 to 2011, (and by weighting each injury as [10 percent](https://www.rssb.co.uk/research-development-and-innovation/research-and-development/research-project-catalogue/t440) of one fatality,) tornadoes are the deadliest event type in the United States. However, if you order the event types by _average_ population harm per event, it turns out you are nearly _15 times_ as likely to be harmed if you find yourself dealing with a tsunami than with a tornado. But, tsunamis occur far less often, which is why they do not show up in the top ten most dangerous types in the first analysis.
+
+### Economic Impact
+
+Based on total property and crop damage amounts from 1996 to 2011, flooding is the costliest event type in the United States. However, if you order the event types by _average_ damage per event, it turns out each hurricane is more than _130 times_ as costly as each flooding incident. Although they occur far less often, that disparity in terms of average economic impact means that hurricanes are still the second-costliest event type _overall_.
+
+## Data Processing
+
+### Reading in the Data
+
+Check for the file in your working directory. If it does not already exist, download the ```noaa.csv.bz2``` file. Use ```read.csv``` to read in the data.
+
+```{r cache = TRUE}
+destfile <- "noaa.csv.bz2"
+fileURL <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+
+if(!file.exists(destfile)) {
+        download.file(fileURL, destfile, method = "curl")
+}
+
+noaa <- read.csv(destfile)
+```
+
+### Selecting Appropriate Variables
+
+In order to answer the two research questions, you only need to keep the ```BGN_DATE``` ```EVTYPE```, ```FATALITIES```, ```INJURIES```, ```PROPDMG```, ```PROPDMGEXP```, ```CROPDMG```, and ```CROPDMGEXP``` variables. Use the ```dplyr``` package to select only those columns.
+
+```{r, message = FALSE}
+library(dplyr)
+noaa <- tbl_df(noaa)
+noaa <- select(noaa, BGN_DATE, EVTYPE, FATALITIES:CROPDMGEXP)
+```
+
+### Cleaning Event Type Variable
+
+Next, clean up the ```EVTYPE``` column. You'll notice that there are 985 different factors, but according to the National Weather Service, there are actually just 48 different types of [recognized storms](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf).
+
+```{r}
+n_distinct(noaa$EVTYPE)
+```
+
+Note that these 48 event types were standardized [after 1996](https://www.ncdc.noaa.gov/stormevents/details.jsp). So filter by all dates on or after 1996-01-01.
+
+```{r}
+noaa$BGN_DATE <- as.POSIXct(strptime(noaa$BGN_DATE, "%m/%d/%Y %T"))
+noaa <- filter(noaa, BGN_DATE >= "1996-01-01")
+```
+
+Before filtering by the list of 48 event types mentioned above, first clean some of the data entry errors. Use the ```toupper``` function to standardize the variable.
+
+```{r}
+noaa$EVTYPE <- toupper(noaa$EVTYPE)
+```
+
+Then, clean up some of the abbreviations and extraneous notations.
+
+```{r}
+library(stringr)
+noaa$EVTYPE <- str_trim(noaa$EVTYPE)
+noaa$EVTYPE <- gsub("TSTM", "THUNDERSTORM", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("G[0-9][0-9]", "", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("/MIX", "", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("WINDS", "WIND", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("FLD", "FLOOD", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("FLOODING", "FLOOD", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("/FOREST ", "", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("/TYPHOON", " (TYPHOON)", noaa$EVTYPE)
+noaa$EVTYPE <- gsub("/HAIL", "", noaa$EVTYPE)
+```
+
+Using the PDF linked above, copy the event types, and save them to a list vector labeled ```types```. Then filter by ```types```. Check to see that you have ~48 distinct types.
+
+```{r}
+types <- toupper(c("Astronomical Low Tide", "Avalanche", "Blizzard", "Coastal Flood", "Cold/Wind Chill", "Debris Flow", "Dense Fog", "Dense Smoke", "Drought", "Dust Devil", "Dust Storm", "Excessive Heat", "Extreme Cold/Wind Chill", "Flash Flood", "Flood", "Frost/Freeze", "Funnel Cloud", "Freezing Fog", "Hail", "Heat", "Heavy Rain", "Heavy Snow", "High Surf", "High Wind", "Hurricane (Typhoon)", "Ice Storm", "Lake-Effect Snow", "Lakeshore Flood", "Lightning", "Marine Hail", "Marine High Wind", "Marine Strong Wind", "Marine Thunderstorm Wind", "Rip Current", "Seiche", "Sleet", "Storm Surge/Tide", "Strong Wind", "Thunderstorm Wind", "Tornado", "Tropical Depression", "Tropical Storm", "Tsunami", "Volcanic Ash", "Waterspout", "Wildfire", "Winter Storm", "Winter Weather"))
+
+noaa <- filter(noaa, EVTYPE %in% types)
+noaa$EVTYPE <- as.factor(noaa$EVTYPE)
+```
+
+```{r}
+n_distinct(noaa$EVTYPE)
+```
+
+### Calculating Harm to Population Health
+
+Create a new table called ```noaaPopHealth```. Summarize by event type, and add two variables. The first, ```total.harm```, adds the number of fatalities and injuries (weighted by [10 percent](https://www.rssb.co.uk/research-development-and-innovation/research-and-development/research-project-catalogue/t440)). The second, ```avg.harm```, takes ```total.harm``` and divides it by the number of instances of each event to calculate the average impact.
+
+```{r}
+noaaPopHealth <- noaa %>%
+        group_by(EVTYPE) %>%
+        summarise(total.harm = sum(FATALITIES, INJURIES*.1), avg.harm = total.harm / length(EVTYPE)) %>%
+        rename(event.type = EVTYPE)
+```
+
+### Calculating Economic Impact
+
+Prepare to adjust the property damage and crop damage variables by their exponentials. Do so, first, by replacing letters with numbers in the exponential columns.
+
+```{r}
+noaa$PROPDMGEXP <- ifelse(noaa$PROPDMGEXP == "K", 1000, ifelse(noaa$PROPDMGEXP == "M", 1000000, ifelse(noaa$PROPDMGEXP == "B", 1000000000, 1)))
+noaa$CROPDMGEXP <- ifelse(noaa$CROPDMGEXP == "K", 1000, ifelse(noaa$CROPDMGEXP == "M", 1000000, ifelse(noaa$CROPDMGEXP == "B", 1000000000, 1)))
+```
+
+Create a new table called ```noaaEcon```. Summarize by event type, and add two variables. The first, ```total.econdamage```, adds the total amounts of property damage and crop damage. The second, ```avg.econdamage```, takes ```total.econdamage``` and divides it by the number of instances of each event to calculate the average amount of damage.
+
+```{r}
+noaaEcon <- noaa %>%
+        group_by(EVTYPE) %>%
+        summarise(prop.econdamage = sum(PROPDMG*PROPDMGEXP), avg.propdamage = prop.econdamage / length(EVTYPE), crop.econdamage = sum(CROPDMG*CROPDMGEXP), avg.cropdamage = crop.econdamage / length(EVTYPE), total.econdamage = sum(prop.econdamage, crop.econdamage), avg.econdamage = total.econdamage / length(EVTYPE)) %>%
+        rename(event.type = EVTYPE)
+```
+
+## Results
+
+### Which types of events are most harmful with respect to population health?
+
+In order to save space, isolate the top ten event types by total and average harm.
+
+```{r}
+topPopHealth <- noaaPopHealth %>%
+        arrange(desc(total.harm)) %>%
+        top_n(10, total.harm)
+```
+
+```{r echo = FALSE, results = "asis"}
+library(pander)
+emphasize.strong.cols(2)
+pandoc.table(topPopHealth, justify = "left")
+```
+
+```{r}
+topavgPopHealth <- noaaPopHealth %>%
+        arrange(desc(avg.harm)) %>%
+        top_n(10, avg.harm)
+```
+
+```{r echo = FALSE, results = "asis"}
+emphasize.strong.cols(3)
+pandoc.table(topavgPopHealth, justify = "left")
+```
+
+Then, using the ```ggplot2``` package, plot both of them together, one on top of the other.
+
+```{r, message = FALSE}
+library(ggplot2)
+library(gridExtra)
+
+ggtotalharm <- ggplot(topPopHealth, aes(x=reorder(event.type, total.harm), y=total.harm)) + geom_bar(stat="identity") + coord_flip() + xlab("") + ylab("Total Population Harm (Fatalities + Injuries*.1)")
+
+ggavgharm <- ggplot(topavgPopHealth, aes(x=reorder(event.type, avg.harm), y=avg.harm)) + geom_bar(stat="identity") + coord_flip() + xlab("") + ylab("Average Population Harm (Fatalities + Injuries*.1) per Event")
+
+grid.arrange(ggtotalharm, ggavgharm, nrow=2, top="Top Ten Harmful Event Types, by Total and Average Population Harm")
+```
+
+### Which types of events have the greatest economic consequences?
+
+In order to save space, isolate the top ten event types by total and average economic impact.
+
+```{r}
+topEcon <- noaaEcon %>%
+        arrange(desc(total.econdamage)) %>%
+        top_n(10, total.econdamage)
+```
+
+```{r echo = FALSE, results = "asis"}
+emphasize.strong.cols(2)
+pandoc.table(topEcon[,c(1,6:7)], justify = "left")
+```
+
+```{r}
+topavgEcon <- noaaEcon %>%
+        arrange(desc(avg.econdamage)) %>%
+        top_n(10, avg.econdamage)
+```
+
+```{r echo = FALSE, results = "asis"}
+emphasize.strong.cols(3)
+pandoc.table(topavgEcon[,c(1,6:7)], justify = "left")
+```
+
+To best plot these, use the ```reshape2``` package to ```melt``` the data frames. This allows you to create a stacked bar chart, showing the impact each storm has on properties and crops.
+
+```{r, message = FALSE}
+library(reshape2)
+topEconMelt <- topEcon[,c(1:2, 4)]
+topEconMelt <- melt(topEconMelt, id = "event.type")
+
+topavgEconMelt <- topavgEcon[,c(1, 3, 5)]
+topavgEconMelt <- melt(topavgEconMelt, id = "event.type")
+```
+
+Using the ```ggplot2``` package, first plot total economic impact.
+
+```{r}
+ggplot(topEconMelt, aes(x=reorder(event.type, value), y=value/1000000)) + 
+        geom_bar(stat="identity", aes(fill = variable)) + 
+        xlab("") + 
+        ylab("Total Economic Impact (Millions USD)") + 
+        scale_fill_discrete(labels = c("Property", "Crops"), name = "Damage") +
+        theme(axis.text.x = element_text(angle = 45, size=8, hjust = 1, vjust = 1)) + 
+        ggtitle("Top Ten Costly Event Types, by Total Damage Amounts")
+```
+
+Next, plot average economic impact.
+
+```{r}
+ggplot(topavgEconMelt, aes(x=reorder(event.type, value), y=value/1000000)) + 
+        geom_bar(stat="identity", aes(fill = variable)) + 
+        xlab("") + 
+        ylab("Average Economic Impact (Millions USD)") + 
+        scale_fill_discrete(labels = c("Property", "Crops"), name = "Damage") +
+        theme(axis.text.x = element_text(angle = 45, size=8, hjust = 1, vjust = 1)) + 
+        ggtitle("Top Ten Costly Event Types, by Average Damage Amounts")
+```
